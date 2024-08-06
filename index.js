@@ -7,22 +7,24 @@ let bodyParser = require("body-parser");
 let cors = require("cors");
 let userRouter = require("./routes/userRouter");
 let database = require("./database/database");
+require("dotenv").config();
 database();
 let io = socket(server,{
     cors:{
-        origin:["http://localhost:5173"]
+        origin:"http://localhost:5173"
     }
 })
-app.use("/user",userRouter);
 app.use(express.json({limit:"100mb"}));
 app.use(bodyParser.json({limit:"100mb"}))
 app.use(bodyParser.urlencoded({extended:true}));
 app.use(cors({
     methods:["GET","POST","PUT","DELETE","PATCH","OPTIONS"],
     origin:"http://localhost:5173",
+    credentials:true
 }))
-server.listen(3000,()=>{
-    console.log("server running on port "+3000);
+app.use("/user",userRouter);
+server.listen(process.env.PORT,()=>{
+    console.log("server running on port "+process.env.PORT);
 })
 // io.on("connection",(socket)=>{
 //     let connections = 0;

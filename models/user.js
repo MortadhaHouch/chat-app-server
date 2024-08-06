@@ -48,8 +48,10 @@ let userSchema = new Schema({
 })
 userSchema.pre("save",async function(){
     try {
-        let salt = await bcrypt.genSalt(10);
-        this.password = await bcrypt.hash(this.password,salt);
+        if(this.isModified("password") ||this.isNew){
+            let salt = await bcrypt.genSalt(10);
+            this.password = await bcrypt.hash(this.password,salt);
+        }
     } catch (error) {
         console.log(error);
     }
