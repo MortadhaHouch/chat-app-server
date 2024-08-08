@@ -4,6 +4,7 @@ let {createServer} = require("http")
 let server = createServer(app)
 let socket = require("socket.io")
 let bodyParser = require("body-parser");
+let cookieParser = require("cookie-parser");
 let cors = require("cors");
 let userRouter = require("./routes/userRouter");
 let database = require("./database/database");
@@ -17,6 +18,7 @@ let io = socket(server,{
 app.use(express.json({limit:"100mb"}));
 app.use(bodyParser.json({limit:"100mb"}))
 app.use(bodyParser.urlencoded({extended:true}));
+app.use(cookieParser());
 app.use(cors({
     methods:["GET","POST","PUT","DELETE","PATCH","OPTIONS"],
     origin:"http://localhost:5173",

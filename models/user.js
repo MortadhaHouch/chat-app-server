@@ -34,7 +34,12 @@ let userSchema = new Schema({
         type:Schema.Types.ObjectId,
         required: true,
     },
-    isCalling:{
+    isAudioCalling:{
+        type:Boolean,
+        required: true,
+        default:false
+    },
+    isVideoCalling:{
         type:Boolean,
         required: true,
         default:false
@@ -43,6 +48,9 @@ let userSchema = new Schema({
         type:[Schema.Types.ObjectId]
     },
     friends:{
+        type:[Schema.Types.ObjectId]
+    },
+    groups:{
         type:[Schema.Types.ObjectId]
     }
 })
