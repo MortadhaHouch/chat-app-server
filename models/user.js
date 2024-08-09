@@ -52,6 +52,12 @@ let userSchema = new Schema({
     },
     groups:{
         type:[Schema.Types.ObjectId]
+    },
+    friendRequests:{
+        type:[Schema.Types.ObjectId]
+    },
+    groupRequests:{
+        type:[Schema.Types.ObjectId]
     }
 })
 userSchema.pre("save",async function(){
