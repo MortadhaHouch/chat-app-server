@@ -8,6 +8,9 @@ let cookieParser = require("cookie-parser");
 let cors = require("cors");
 let userRouter = require("./routes/userRouter");
 let database = require("./database/database");
+const notificationsRouter = require("./routes/notificationsRouter")
+const groupRouter = require("./routes/groupRouter")
+const messageRouter = require("./routes/messageRouter")
 require("dotenv").config();
 database();
 let io = socket(server,{
@@ -25,6 +28,9 @@ app.use(cors({
     credentials:true
 }))
 app.use("/user",userRouter);
+app.use("/notifications",notificationsRouter);
+app.use("/groups",groupRouter);
+app.use("/message",messageRouter);
 server.listen(process.env.PORT,()=>{
     console.log("server running on port "+process.env.PORT);
 })

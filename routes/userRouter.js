@@ -5,13 +5,13 @@ let dotenv = require("dotenv");
 const User = require('../models/user');
 let bcrypt = require('bcrypt');
 const File = require('../models/file');
-const Room = require('../models/room');
 const Message = require('../models/message');
 let Notification = require('../models/notification');
 let requestIP = require("request-ip");
 let multer = require("multer");
 let path = require('path');
 let Request = require("../models/friendRequest");
+let Discussion = require("../models/discussion");
 let storage = multer.diskStorage({
     destination: function (req, file, cb) {
         cb(null, "../uploads")
@@ -50,10 +50,12 @@ userRouter.post("/login",async(req,res)=>{
                     firstName:user.firstName,
                     lastName:user.lastName,
                     avatar:avatar.path,
+                    dateOfBirth:user.dateOfBirth,
                     friends,
                     isVerified:true,
                 },process.env.SECRET_KEY);
                 user.isLoggedIn = true;
+                user.inactiveSince = "";
                 await user.save();
                 res.status(200).json({token});
             }else{
@@ -88,7 +90,8 @@ userRouter.post("/signup", async(req,res)=>{
                 avatar:userAvatar._id,
                 isLoggedIn:true,
                 dateOfBirth:date,
-                currentIp:requestIP.getClientIp(req)
+                currentIp:requestIP.getClientIp(req),
+                inactiveSince:""
             })
             let token = jwt.sign({
                 email,
@@ -112,25 +115,41 @@ userRouter.get("/friends", async(req,res)=>{
             let user = await User.findOne({email});
             if(user){
                 let friends = [];
+                let foundDiscussions = await Discussion.find({
+                    members:{
+                        $in:[user._id]
+                    }
+                })
                 for (const el of user.friends) {
-                    let friend = await User.findById(el._id)
+                    let friend = await User.findById(el._id);
                     if(friend){
+                        let sharedDiscussions = foundDiscussions.filter((item) => item.members.includes(friend._id));
                         let friendAvatar = await File.findById(friend.avatar);
-                        let messages = await Message.find({
-                            from:user._id,
-                            to:friend._id
-                        })
+                        let discussionObject={};
+                        for (const el of sharedDiscussions) {
+                            if(el.members.length == 2){
+                                let messages = await Message.find({isSeen:false});
+                                if(messages.length > 0){
+                                    for(let item of messages){
+                                        discussionObject = {
+                                            messageIsMine:item.from._id.toString() == friend._id.toString(),
+                                            filesCount:item.files.length,
+                                            reactions:item.reactions.length,
+                                            unseenMessagesCount:messages.length,
+                                            content:messages[messages.length - 1].content
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         let friendObject = {
-                            email:friend.email,
-                            name:`${friend.firstName} ${friend.lastName}`,
-                            friendAvatar:friendAvatar.path,
-                            unseenMessagesCount:messages.filter((item)=>!item.isSeen).length,
-                            messageIsMine:messages[messages.length - 1].from.toString()===user._id.toString(),
-                            lastMessage:messages[messages.length - 1].content,
-                            files:messages[messages.length - 1].files.length,
                             isLoggedIn:friend.isLoggedIn,
                             isVideoCalling:friend.isVideoCalling,
                             isAudioCalling:friend.isAudioCalling,
+                            email:friend.email,
+                            name:`${friend.firstName} ${friend.lastName}`,
+                            friendAvatar:friendAvatar.path,
+                            discussionObject,
                         }
                         friends.push(friendObject);
                     }
@@ -164,6 +183,7 @@ userRouter.get("/search-friends", async(req,res)=>{
                             res.json({token})
                         }else{
                             let items = [];
+                            let similarFriendsCount = 0;
                             for (const element of usersByLastName) {
                                 let friendAvatar = await File.findById(element.avatar);
                                 let requestObject = null;
@@ -177,6 +197,11 @@ userRouter.get("/search-friends", async(req,res)=>{
                                         to:friendRequest.to,
                                     }
                                 }
+                                for(let el of element.friends){
+                                    if(user.friends.includes(el)){
+                                        similarFriendsCount++;
+                                    }
+                                }
                                 let elementObject = {
                                     email:element.email,
                                     name:`${element.firstName} ${element.lastName}`,
@@ -184,6 +209,10 @@ userRouter.get("/search-friends", async(req,res)=>{
                                     isLoggedIn:element.isLoggedIn,
                                     isMyFriend:user.friends.includes(element._id),
                                     isBlocked:user.friends.includes(element._id) && user.blockedUsers.includes(element._id),
+                                    isAudioCalling:element.isAudioCalling,
+                                    isVideoCalling:element.isVideoCalling,
+                                    isMe:user._id == element._id.toString(),
+                                    similarFriendsCount,
                                     id:element._id,
                                     requestObject
                                 }
@@ -194,6 +223,7 @@ userRouter.get("/search-friends", async(req,res)=>{
                         }
                     }else{
                         let items = [];
+                        let similarFriendsCount = 0;
                         for (const element of usersByFirstName) {
                             let requestObject = null;
                             let friendRequest = await Request.findOne({
@@ -206,14 +236,23 @@ userRouter.get("/search-friends", async(req,res)=>{
                                     to:friendRequest.to,
                                 }
                             }
+                            for(let el of element.friends){
+                                if(user.friends.includes(el)){
+                                    similarFriendsCount++;
+                                }
+                            }
                             let friendAvatar = await File.findById(element.avatar);
                             let elementObject = {
                                 email:element.email,
                                 name:`${element.firstName} ${element.lastName}`,
                                 friendAvatar:friendAvatar.path,
                                 isLoggedIn:element.isLoggedIn,
-                                isVideoCalling:element.isVideoCalling,
+                                isMyFriend:user.friends.includes(element._id),
+                                isBlocked:user.friends.includes(element._id) && user.blockedUsers.includes(element._id),
                                 isAudioCalling:element.isAudioCalling,
+                                isVideoCalling:element.isVideoCalling,
+                                isMe:user._id == element._id.toString(),
+                                similarFriendsCount,
                                 id:element._id,
                                 requestObject
                             }
@@ -231,6 +270,7 @@ userRouter.get("/search-friends", async(req,res)=>{
                             res.json({token})
                         }else{
                             let items = [];
+                            let similarFriendsCount;
                             for (const element of usersInv) {
                                 let requestObject = null;
                                 let friendRequest = await Request.findOne({
@@ -243,14 +283,23 @@ userRouter.get("/search-friends", async(req,res)=>{
                                         to:friendRequest.to,
                                     }
                                 }
+                                for(let el of element.friends){
+                                    if(user.friends.includes(el)){
+                                        similarFriendsCount++;
+                                    }
+                                }
                                 let friendAvatar = await File.findById(element.avatar);
                                 let elementObject = {
                                     email:element.email,
                                     name:`${element.firstName} ${element.lastName}`,
                                     friendAvatar:friendAvatar.path,
                                     isLoggedIn:element.isLoggedIn,
-                                    isVideoCalling:element.isVideoCalling,
+                                    isMyFriend:user.friends.includes(element._id),
+                                    isBlocked:user.friends.includes(element._id) && user.blockedUsers.includes(element._id),
                                     isAudioCalling:element.isAudioCalling,
+                                    isVideoCalling:element.isVideoCalling,
+                                    isMe:user._id == element._id.toString(),
+                                    similarFriendsCount,
                                     id:element._id,
                                     requestObject
                                 }
@@ -261,6 +310,7 @@ userRouter.get("/search-friends", async(req,res)=>{
                         }
                     }else{
                         let items = [];
+                        let similarFriendsCount = 0;
                         for (const element of users) {
                             let requestObject = null;
                             let friendRequest = await Request.findOne({
@@ -273,14 +323,23 @@ userRouter.get("/search-friends", async(req,res)=>{
                                     to:friendRequest.to,
                                 }
                             }
+                            for(let el of element.friends){
+                                if(user.friends.includes(el)){
+                                    similarFriendsCount++;
+                                }
+                            }
                             let friendAvatar = await File.findById(element.avatar);
                             let elementObject = {
                                 email:element.email,
                                 name:`${element.firstName} ${element.lastName}`,
                                 friendAvatar:friendAvatar.path,
                                 isLoggedIn:element.isLoggedIn,
-                                isVideoCalling:element.isVideoCalling,
+                                isMyFriend:user.friends.includes(element._id),
+                                isBlocked:user.friends.includes(element._id) && user.blockedUsers.includes(element._id),
                                 isAudioCalling:element.isAudioCalling,
+                                isVideoCalling:element.isVideoCalling,
+                                isMe:user._id == element._id.toString(),
+                                similarFriendsCount,
                                 id:element._id,
                                 requestObject
                             }
@@ -290,9 +349,10 @@ userRouter.get("/search-friends", async(req,res)=>{
                         res.status(200).json({token})
                     }
                 }
+            }else{
+                let token = jwt.sign({data:req.query},process.env.SECRET_KEY);
+                res.json({token})
             }
-            let token = jwt.sign({data:req.query},process.env.SECRET_KEY);
-            res.json({token})
         }else{
             let token = jwt.sign({error:"something went wrong XD"},process.env.SECRET_KEY);
             res.status(404).json({token});
@@ -389,7 +449,8 @@ userRouter.get("/requests",async(req,res)=>{
                 let requestObject = {
                     senderAvatar:senderAvatar.path,
                     requestSender:`${requestSender.firstName} ${requestSender.lastName}`,
-                    id:element._id
+                    isMine:requestSender._id.toString() == user._id.toString(),
+                    id:element._id,
                 }
                 friendRequests.push(requestObject);
             }
@@ -420,19 +481,31 @@ userRouter.put("/requests-toggle",async(req,res)=>{
                     content:`${requestSender.firstName} ${requestSender.lastName} has been added to your friends list`,
                     handler:requestReceiver._id
                 });
+                requestSender.friendRequests.splice(requestSender.friendRequests.indexOf(request._id), 1);
+                requestReceiver.friendRequests.splice(requestReceiver.friendRequests.indexOf(request._id),1);
+                await Request.findByIdAndDelete(request._id);
+                requestSender.friends.push(requestReceiver._id);
+                requestReceiver.friends.push(requestSender._id);
+                await requestSender.save();
+                await requestReceiver.save();
                 let token = jwt.sign({message_success:"friend added"},process.env.SECRET_KEY);
                 res.json({token});
             }else{
                 let notificationForSender = await Notification.create({
-                    for:user._id,
+                    for:requestSender._id,
                     content:`Friend request rejected by ${requestReceiver.firstName} ${requestReceiver.lastName}`,
-                    handler:requestReceiver._id
+                    handler:requestSender._id
                 });
                 let notificationForReceiver = await Notification.create({
-                    for:user._id,
+                    for:requestReceiver._id,
                     content:`${requestSender.firstName} ${requestSender.lastName} request has been rejected`,
-                    handler:requestReceiver._id
+                    handler:requestSender._id
                 });
+                requestSender.friendRequests.splice(requestSender.friendRequests.indexOf(request._id), 1);
+                requestReceiver.friendRequests.splice(requestReceiver.friendRequests.indexOf(request._id),1);
+                await Request.findByIdAndDelete(request._id);
+                await requestSender.save();
+                await requestReceiver.save();
                 let token = jwt.sign({message_failure:"friend removed"},process.env.SECRET_KEY);
                 res.json({token});
             }
@@ -443,139 +516,19 @@ userRouter.put("/requests-toggle",async(req,res)=>{
         console.log(error);
     }
 })
-userRouter.get("/groups", async(req,res)=>{
-    try {
-        if(req.cookies.jwt_token){
-            let {email} = jwt.verify(req.cookies.jwt_token,process.env.SECRET_KEY);
-            let user = await User.findOne({email});
-            if(user){
-                let groups = [];
-                for (const el of user.groups) {
-                    let group = await Room.findById(el._id)
-                    if(group){
-                        let groupAvatar = await File.findById(group.avatar);
-                        let messages=[];
-                        for (const element of group.messages) {
-                            let message = await Message.findById(element._id);
-                            let messageSender = await User.findById(message.from);
-                            let senderAvatar = await File.findById(messageSender.avatar);
-                            let messageObject = {
-                                senderAvatar:senderAvatar.path,
-                                message:message.content,
-                                messageSender:`${messageSender.firstName} ${messageSender.lastName}`,
-                                messageIsMine:message.from.toString()===user._id.toString(),
-                                lastMessage:message.content,
-                                files:message.files.length,
-                                reactions:message.reactions.length,
-                                onlineUsersCount:group.users.length
-                            }
-                            messages.push(messageObject);
-                        }
-                        let groupObject = {
-                            groupName:group.name,
-                            groupAvatar:groupAvatar.path,
-                            unseenMessagesCount:messages.filter((item)=>!item.isSeen).length,
-                            messages
-                        }
-                        groups.push(groupObject);
-                    }
-                }
-                let token = jwt.sign({groups},process.env.SECRET_KEY);
-                res.status(200).json({token});
-            }else{
-                let token = jwt.sign({error:"something went wrong"},process.env.SECRET_KEY);
-                res.status(404).json({token});
-            }
-        }else{
-            let token = jwt.sign({error:"something went wrong XD"},process.env.SECRET_KEY);
-            res.status(404).json({token});
-        }
-    } catch (error) {
-        console.log(error);
-    }
-})
-userRouter.post("/toggle-join-group", async(req,res)=>{
-    try {
-        if(req.cookies.jwt_token){
-            let {email} = jwt.verify(req.cookies.jwt_token,process.env.SECRET_KEY);
-            let user = await User.findOne({email});
-            let groupId = jwt.verify(req.body.body,process.env.SECRET_KEY).id;
-            let group = await Room.findById(groupId);
-            if(group.users.includes(user._id)){
-                group.users.splice(group.users.indexOf(user._id),1);
-            }
-        }else{
-            let token = jwt.sign({error:"something went wrong"},process.env.SECRET_KEY);
-            res.status(404).json({token});
-        }
-    } catch (error) {
-        console.log(error);
-    }
-})
-userRouter.get("/notifications", async(req,res)=>{
-    try {
-        if(req.cookies.jwt_token){
-            let {email} = jwt.verify(req.cookies.jwt_token,process.env.SECRET_KEY);
-            let user = await User.findOne({email});
-            let userNotifications = [];
-            let notifications = await Notification.find({
-                for:user._id,
-            })
-            for (const element of notifications) {
-                let notificationHandler = User.findById(element.handler);
-                let notificationHandlerAvatar = await File.findById(notificationHandler.avatar);
-                let notificationObject = {
-                    content:element.content,
-                    createdAt:element.createdAt,
-                    handler:notificationHandler._id,
-                    notificationHandlerAvatar:notificationHandlerAvatar.path
-                }
-                userNotifications.push(notificationObject);
-            }
-            let token = jwt.sign({userNotifications},process.env.SECRET_KEY);
-            res.status(200).json({token});
-        }else{
-            let token = jwt.sign({error:"something went wrong"},process.env.SECRET_KEY);
-            res.status(404).json({token});
-        }
-    } catch (error) {
-        console.log(error);
-    }
-})
 userRouter.post("/logout",async(req,res)=>{
     try {
-        let {email} = jwt.verify(req.cookies.jwt_token,process.env.SECRET_KEY);
-        let user = await User.findOne({email});
-        if(user){
-            if(req.cookies.jwt_token){
-                let {email} = jwt.verify(req.cookies.jwt_token,process.env.SECRET_KEY);
-                let user = await User.findOne({email});
-                if(user){
-                    let userRooms = await Room.find({users:{$in:[user._id]}});
-                    let rooms = [];
-                    for (const el of userRooms) {
-                        let roomAvatar = await File.findById(el._id);
-                        let lastMessage = await Message.findById(el._id);
-                        let roomObject = {
-                            name:el.name,
-                            avatar:roomAvatar.path,
-                            activeMembers:el.users.length
-                        }
-                        rooms.push(roomObject);
-                    }
-                    let token = jwt.sign({rooms},process.env.SECRET_KEY);
-                    res.status(200).json({token});
-                }else{
-                    let token = jwt.sign({error:"something went wrong"},process.env.SECRET_KEY);
-                    res.status(404).json({token});
-                }
-            }else{
-                let token = jwt.sign({error:"something went wrong XD"},process.env.SECRET_KEY);
-                res.status(404).json({token});
-            }
+        if(req.cookies.jwt_token){
+            let {email} = jwt.verify(req.cookies.jwt_token,process.env.SECRET_KEY);
+            let user = await User.findOne({email});
+            user.isLoggedIn = false;
+            user.inactiveSince = Date.now().toString();
+            await user.save();
+            let token = jwt.sign({message:"successfully logged out"},process.env.SECRET_KEY);
+            res.json({token})
         }else{
             let token = jwt.sign({error:"something went wrong"},process.env.SECRET_KEY);
-            res.status(400).json({token});
+            res.json({token});
         }
     } catch (error) {
         console.log(error);

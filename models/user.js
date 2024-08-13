@@ -58,8 +58,13 @@ let userSchema = new Schema({
     },
     groupRequests:{
         type:[Schema.Types.ObjectId]
+    },
+    inactiveSince:{
+        type:String,
+        required:false,
+        default:Date.now().toString(),
     }
-})
+},{timestamps:true})
 userSchema.pre("save",async function(){
     try {
         if(this.isModified("password") ||this.isNew){

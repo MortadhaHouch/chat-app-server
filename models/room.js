@@ -12,6 +12,14 @@ let roomSchema = new Schema({
     },
     messages:{
         type:[Schema.Types.ObjectId]
+    },
+    isPrivate:{
+        type:Boolean,
+        default:true
+    },
+    admin:{
+        type:Schema.Types.ObjectId,
+        required:true
     }
 })
 
