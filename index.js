@@ -11,6 +11,7 @@ let database = require("./database/database");
 const notificationsRouter = require("./routes/notificationsRouter")
 const groupRouter = require("./routes/groupRouter")
 const messageRouter = require("./routes/messageRouter")
+let fileUpload = require("express-fileupload")
 require("dotenv").config();
 database();
 let io = socket(server,{
@@ -27,6 +28,9 @@ app.use(cors({
     origin:"http://localhost:5173",
     credentials:true
 }))
+app.use(fileUpload({
+    preserveExtension : true,
+}));
 app.use("/user",userRouter);
 app.use("/notifications",notificationsRouter);
 app.use("/groups",groupRouter);
