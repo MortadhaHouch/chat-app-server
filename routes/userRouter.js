@@ -108,66 +108,66 @@ userRouter.post("/signup", async(req,res)=>{
         console.log(error);
     }
 })
-userRouter.get("/friends", async(req,res)=>{
+userRouter.get("/friends", async (req, res) => {
     try {
-        if(req.cookies.jwt_token){
-            let {email} = jwt.verify(req.cookies.jwt_token,process.env.SECRET_KEY);
-            let user = await User.findOne({email});
-            if(user){
+        if (req.cookies.jwt_token) {
+            let { email } = jwt.verify(req.cookies.jwt_token, process.env.SECRET_KEY);
+            let user = await User.findOne({ email });
+            if (user) {
                 let friends = [];
-                let foundDiscussions = await Discussion.find({
-                    members:{
-                        $in:[user._id]
-                    }
-                })
-                for (const el of user.friends) {
-                    let friend = await User.findById(el._id);
-                    if(friend){
-                        let sharedDiscussions = foundDiscussions.filter((item) => item.members.includes(friend._id));
-                        let friendAvatar = await File.findById(friend.avatar);
-                        let discussionObject={};
-                        for (const el of sharedDiscussions) {
-                            if(el.members.length == 2){
-                                let messages = await Message.find({isSeen:false});
-                                if(messages.length > 0){
-                                    for(let item of messages){
-                                        discussionObject = {
-                                            messageIsMine:item.from._id.toString() == friend._id.toString(),
-                                            filesCount:item.files.length,
-                                            reactions:item.reactions.length,
-                                            unseenMessagesCount:messages.length,
-                                            content:messages[messages.length - 1].content
-                                        }
+                await Promise.all(user.friends.map(async (friendId) => {
+                    let friend = await User.findById(friendId);
+                    if (!friend) return null;
+                    let foundDiscussion = await Discussion.findOne({
+                        members: { $all: [friend._id,user._id] }
+                    });
+                    if(foundDiscussion){
+                        let messages = [];
+                        for await (const element of foundDiscussion.messages) {
+                            let message = await Message.findById(element);
+                            if(message){
+                                messages.push(
+                                    {
+                                        messageIsMine: message.from.toString() === user._id.toString(),
+                                        filesCount: message.files.length,
+                                        reactions: message.reactions.length,
+                                        unseenMessagesCount: foundDiscussion.messages.length,
+                                        content: message.content,
+                                        createdAt: message.createdAt,
+                                        id:message._id
                                     }
-                                }
+                                )
                             }
                         }
-                        let friendObject = {
-                            isLoggedIn:friend.isLoggedIn,
-                            isVideoCalling:friend.isVideoCalling,
-                            isAudioCalling:friend.isAudioCalling,
-                            email:friend.email,
-                            name:`${friend.firstName} ${friend.lastName}`,
-                            friendAvatar:friendAvatar.path,
-                            discussionObject,
-                        }
-                        friends.push(friendObject);
+                        let friendAvatar = await File.findById(friend.avatar);
+                        let userObject = {
+                            isLoggedIn: friend.isLoggedIn,
+                            isVideoCalling: friend.isVideoCalling,
+                            isAudioCalling: friend.isAudioCalling,
+                            email: friend.email,
+                            username: `${friend.firstName} ${friend.lastName}`,
+                            friendAvatar: friendAvatar.path,
+                            discussionId:foundDiscussion._id,
+                            id: friend._id,
+                            messages
+                        };
+                        friends.push(userObject);
                     }
-                }
-                let token = jwt.sign({friends},process.env.SECRET_KEY);
-                res.status(200).json({token});
-            }else{
-                let token = jwt.sign({error:"something went wrong"},process.env.SECRET_KEY);
-                res.status(404).json({token});
+                }));
+                friends = friends.filter(friend => friend !== null);
+                let token = jwt.sign({ friends }, process.env.SECRET_KEY);
+                return res.status(200).json({ token });
+            } else {
+                return res.status(404).json({ error: "User not found" });
             }
-        }else{
-            let token = jwt.sign({error:"something went wrong XD"},process.env.SECRET_KEY);
-            res.status(404).json({token});
+        } else {
+            return res.status(401).json({ error: "Unauthorized access" });
         }
     } catch (error) {
-        console.log(error);
+        console.error(error);
+        return res.status(500).json({ error: "Internal Server Error" });
     }
-})
+});
 userRouter.get("/search-friends", async(req,res)=>{
     try {
         if(req.cookies.jwt_token){
@@ -481,6 +481,10 @@ userRouter.put("/requests-toggle",async(req,res)=>{
                     content:`${requestSender.firstName} ${requestSender.lastName} has been added to your friends list`,
                     handler:requestReceiver._id
                 });
+                let discussion =new Discussion({});
+                discussion.members.push(requestReceiver._id);
+                discussion.members.push(requestSender._id);
+                await discussion.save();
                 requestSender.friendRequests.splice(requestSender.friendRequests.indexOf(request._id), 1);
                 requestReceiver.friendRequests.splice(requestReceiver.friendRequests.indexOf(request._id),1);
                 await Request.findByIdAndDelete(request._id);

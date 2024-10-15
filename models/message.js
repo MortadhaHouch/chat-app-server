@@ -4,10 +4,6 @@ let messageSchema = new Schema({
         type:String,
         required:true
     },
-    addedOn:{
-        type:String,
-        default:Date.now().toString()
-    },
     from:{
         type:Schema.Types.ObjectId,
         required:true
@@ -30,5 +26,5 @@ let messageSchema = new Schema({
     reactions:{
         type:[Schema.Types.ObjectId],
     }
-})
+},{timestamps:true});
 module.exports = model("Message",messageSchema)

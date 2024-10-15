@@ -6,9 +6,5 @@ let discussionSchema = new Schema({
     messages:{
         type:[Schema.ObjectId],
     },
-    key:{
-        type:String,
-        required:true,
-    }
 })
 module.exports = model("discussion",discussionSchema)

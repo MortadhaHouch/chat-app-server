@@ -12,12 +12,17 @@ const notificationsRouter = require("./routes/notificationsRouter")
 const groupRouter = require("./routes/groupRouter")
 const messageRouter = require("./routes/messageRouter")
 let fileUpload = require("express-fileupload")
+const checkUserAuth = require("./middlewares/checkUserAuth")
+let User = require("./models/user");
+let jwt = require("jsonwebtoken");
+let Discussion = require("./models/discussion");
+let Message = require("./models/message");
 require("dotenv").config();
 database();
 let io = socket(server,{
     cors:{
         origin:"http://localhost:5173"
-    }
+    },
 })
 app.use(express.json({limit:"100mb"}));
 app.use(bodyParser.json({limit:"100mb"}))
@@ -31,68 +36,56 @@ app.use(cors({
 app.use(fileUpload({
     preserveExtension : true,
 }));
+// io.use(async(socket, next)=>{
+//     if(socket.handshake.auth.token.length > 0){
+//         let {email} = jwt.verify(socket.handshake.auth.token,process.env.SECRET_KEY);
+//         let user = await User.findOne({email});
+//         if(user){
+//             console.log(`${user.firstName} ${user.lastName} connected`);
+//         }
+//     }
+//     next()
+// })
 app.use("/user",userRouter);
-app.use("/notifications",notificationsRouter);
-app.use("/groups",groupRouter);
-app.use("/message",messageRouter);
+app.use("/notifications",checkUserAuth,notificationsRouter);
+app.use("/groups",checkUserAuth,groupRouter);
+app.use("/message",checkUserAuth,messageRouter);
 server.listen(process.env.PORT,()=>{
     console.log("server running on port "+process.env.PORT);
 })
-// io.on("connection",(socket)=>{
-//     let connections = 0;
-//     connections++;
-//     socket.emit("connection-established",connections)
-//     socket.on("message",(data)=>{
-//         if(data.room){
-//             socket.to(data.room).emit("message-received",{...data,connections});
-//         }else{
-//             socket.emit("message-received",{...data,connections});
-//         }
-//     })
-//     socket.on("is-typing",(data)=>{
-//         socket.to(data.room).emit("is-user-typing",{...data,connections});
-//     })
-//     socket.on("is-not-typing",(data)=>{
-//         socket.to(data.room).emit("user-not-typing",{...data,connections});
-//     })
-//     socket.on("join-room",(data)=>{
-//         connections++;
-//         socket.join(data.room);
-//         socket.emit("room-joined","room joined successfully",{...data,connections});
-//     })
-//     socket.on("disconnect-user",(data)=>{
-//         connections--;
-//         socket.join(data.room);
-//         socket.to(data.room).emit("user-disconnection-encountered","user disconnected",{...data,connections});
-//     })
-//     socket.on("server-error",(data)=>{
-//         connections--;
-//         socket.join(data.room);
-//         socket.emit("server-error-encountered","server error",{...data,connections})
-//     })
-//     socket.on("ping-timeout",(data)=>{
-//         connections--;
-//         socket.join(data.room);
-//         socket.emit("response-timeout-encountered","response timeout error",{...data,connections})
-//     })
-//     socket.on("transport-close",(data)=>{
-//         connections--;
-//         socket.join(data.room);
-//         socket.emit("transport-closure-encountered","transport closure error",{...data,connections})
-//     })
-//     socket.on("transport-error",(data)=>{
-//         connections--;
-//         socket.join(data.room);
-//         socket.emit("transport-error-encountered","transport error",{...data,connections})
-//     })
-//     socket.on("connect-to-user",(id)=>{
-//         socket.join(id);
-//         socket.emit("connected-to-user",id);
-//     })
-//     socket.on("disconnect-user",(id)=>{
-//         socket.emit("user-disconnected",id);
-//     })
-// })
+io.on("connection",(socket)=>{
+    socket.on("send-message",async(data)=>{
+        if(socket.handshake.auth.token?.length > 0){
+            let discussion = await Discussion.findById(data.discussionId);
+            let {email} = jwt.verify(socket.handshake.auth.token,process.env.SECRET_KEY);
+            let user = await User.findOne({email});
+            if(discussion && user && discussion.members.includes(user._id)){
+                let message = new Message({
+                    content:data.message,
+                    from:user._id
+                })
+                message.to.push(...discussion.members.filter((id)=>id.toString()!==user._id.toString()));
+                await message.save();
+                discussion.messages.push(message._id);
+                await discussion.save();
+                if(!socket.rooms.has(data.discussionId)){
+                    socket.join(data.discussionId);
+                    socket.emit("receive-message",{
+                        content:message.content,
+                        filesCount:message.files.length,
+                        messageIsMine:message.from.toString()===user._id.toString(),
+                        reactions:message.reactions.length,
+                        unseenMessagesCount:discussion.messages.filter((item)=>!item.isSeen).length,
+                        createdAt:message.createdAt,
+                        id:message._id
+                    });
+                }
+            }
+        }else{
+            return;
+        }
+    })
+})
 app.get("/",(req,res)=>{
     res.status(200).json({message:"connected"})
 })
