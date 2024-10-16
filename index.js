@@ -54,35 +54,52 @@ server.listen(process.env.PORT,()=>{
     console.log("server running on port "+process.env.PORT);
 })
 io.on("connection",(socket)=>{
+    socket.on("join-room", async ({ discussionId }) => {
+        const rooms = Array.from(socket.rooms);
+        if (!rooms.includes(discussionId)) {
+            socket.join(discussionId);
+            console.log(`Socket ${socket.id} joined room ${discussionId}`);
+            io.emit("room-joined", { discussionId });
+        } else {
+            console.log(`Socket ${socket.id} is already in room ${discussionId}`);
+        }
+    });
     socket.on("send-message",async(data)=>{
-        if(socket.handshake.auth.token?.length > 0){
-            let discussion = await Discussion.findById(data.discussionId);
-            let {email} = jwt.verify(socket.handshake.auth.token,process.env.SECRET_KEY);
-            let user = await User.findOne({email});
-            if(discussion && user && discussion.members.includes(user._id)){
-                let message = new Message({
-                    content:data.message,
-                    from:user._id
-                })
-                message.to.push(...discussion.members.filter((id)=>id.toString()!==user._id.toString()));
-                await message.save();
-                discussion.messages.push(message._id);
-                await discussion.save();
-                if(!socket.rooms.has(data.discussionId)){
-                    socket.join(data.discussionId);
-                    socket.emit("receive-message",{
-                        content:message.content,
-                        filesCount:message.files.length,
-                        messageIsMine:message.from.toString()===user._id.toString(),
-                        reactions:message.reactions.length,
-                        unseenMessagesCount:discussion.messages.filter((item)=>!item.isSeen).length,
-                        createdAt:message.createdAt,
-                        id:message._id
-                    });
+        try {
+            if(socket.handshake.auth.token?.length > 0){
+                let discussion = await Discussion.findById(data.discussionId);
+                let {email} = jwt.verify(socket.handshake.auth.token,process.env.SECRET_KEY);
+                let user = await User.findOne({email});
+                if (!user){
+                    return;
                 }
+                if(discussion && discussion.members.includes(user._id)){
+                    let message = new Message({
+                        content:data.message,
+                        from:user._id
+                    })
+                    message.to.push(...discussion.members.filter((id)=>id.toString()!==user._id.toString()));
+                    await message.save();
+                    discussion.messages.push(message._id);
+                    await discussion.save();
+                    if(!socket.rooms.has(data.discussionId)){
+                        socket.join(data.discussionId);
+                        io.compress(false).to(data.discussionId).emit("receive-message",{
+                            content:message.content,
+                            filesCount:message.files.length,
+                            messageIsMine:message.from.toString()===user._id.toString(),
+                            reactions:message.reactions.length,
+                            unseenMessagesCount:discussion.messages.filter((item)=>!item.isSeen).length,
+                            createdAt:message.createdAt,
+                            id:message._id
+                        });
+                    }
+                }
+            }else{
+                return;
             }
-        }else{
-            return;
+        } catch (error) {
+            console.log(error);
         }
     })
 })
