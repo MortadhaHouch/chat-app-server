@@ -1,541 +1,563 @@
-let express = require('express');
-let jwt = require("jsonwebtoken")
-let userRouter = express.Router();
-let dotenv = require("dotenv");
+const express = require('express');
+const jwt = require("jsonwebtoken");
+const userRouter = express.Router();
+const dotenv = require("dotenv");
 const User = require('../models/user');
-let bcrypt = require('bcrypt');
+const bcrypt = require('bcrypt');
 const File = require('../models/file');
 const Message = require('../models/message');
-let Notification = require('../models/notification');
-let requestIP = require("request-ip");
-let multer = require("multer");
-let path = require('path');
-let Request = require("../models/friendRequest");
-let Discussion = require("../models/discussion");
-let storage = multer.diskStorage({
+const Notification = require('../models/notification');
+const requestIP = require("request-ip");
+const multer = require("multer");
+const path = require('path');
+const Request = require("../models/friendRequest");
+const Discussion = require("../models/discussion");
+
+// Multer configuration
+const storage = multer.diskStorage({
     destination: function (req, file, cb) {
         cb(null, "../uploads")
     },
     filename: function (req, file, cb) {
-        cb(null,file.fieldname+"."+path.extname(file))
+        cb(null, file.fieldname + "." + path.extname(file))
     }
-})
-let uploads = multer({storage});
+});
+
+const uploads = multer({ storage });
 dotenv.config();
-userRouter.post("/login",async(req,res)=>{
+
+// Helper function to verify JWT token
+const verifyToken = (token) => {
     try {
-        let {email,password} = jwt.verify(req.body.body,process.env.SECRET_KEY);
-        let user = await User.findOne({email});
-        if(user){
-            let validPassword = await bcrypt.compare(password,user.password);
-            if(validPassword){
-                let avatar = await File.findById(user.avatar);
-                let friends = [];
-                for (const friend of user.friends) {
-                    let friendObject = await User.findById(friend._id);
-                    let friendAvatar = await File.findById(friendObject.avatar);
-                    friends.push({
-                        email:friendObject.email,
-                        firstName:friendObject.firstName,
-                        lastName:friendObject.lastName,
-                        friendAvatar:friendAvatar.path,
-                        isLoggedIn:friendObject.isLoggedIn,
-                        isVideoCalling:friendObject.isVideoCalling,
-                        isAudioCalling:friendObject.isAudioCalling,
-                    })
-                }
-                let token = jwt.sign({
-                    email, 
-                    password,
-                    firstName:user.firstName,
-                    lastName:user.lastName,
-                    avatar:avatar.path,
-                    dateOfBirth:user.dateOfBirth,
-                    friends,
-                    isVerified:true,
-                },process.env.SECRET_KEY);
-                user.isLoggedIn = true;
-                user.inactiveSince = "";
-                await user.save();
-                res.status(200).json({token});
-            }else{
-                let token = jwt.sign({password_error:"please verify your password"},process.env.SECRET_KEY);
-                res.status(200).json({token});
-            }
-        }else{
-            let token = jwt.sign({email_error:"user with this email does not exist please verify your password and try again or create an account"},process.env.SECRET_KEY);
-            res.status(200).json({token});
-        }
+        return jwt.verify(token, process.env.SECRET_KEY);
     } catch (error) {
-        console.log(error);
+        return null;
     }
-})
-userRouter.post("/signup", async(req,res)=>{
+};
+
+// Login endpoint
+userRouter.post("/login", async (req, res) => {
     try {
-        let {email,password,firstName,lastName,avatar,date} = jwt.verify(req.body.body,process.env.SECRET_KEY);
+        const { email, password } = req.body;
+        const user = await User.findOne({ email });
         
-        let user = await User.findOne({email});
-        if(user){
-            let token = jwt.sign({email_error:"user with this email does exist"},process.env.SECRET_KEY);
-            res.status(400).json({token})
-        }else{
-            let userAvatar = await File.create({
-                path:avatar
-            })
-            let createdUser = await User.create({
-                email,
-                firstName,
-                lastName,
-                password,
-                avatar:userAvatar._id,
-                isLoggedIn:true,
-                dateOfBirth:date,
-                currentIp:requestIP.getClientIp(req),
-                inactiveSince:""
-            })
-            let token = jwt.sign({
-                email,
-                firstName,
-                lastName,
-                avatar,
-                isVerified:true,
-                dateOfBirth:date
-            },
-            process.env.SECRET_KEY);
-            res.status(201).json({token});
+        if (!user) {
+            return res.status(400).json({ email_error: "User with this email does not exist" });
         }
+
+        const validPassword = await bcrypt.compare(password, user.password);
+        if (!validPassword) {
+            return res.status(400).json({ error: "Invalid password" });
+        }
+
+        const avatar = await File.findById(user.avatar);
+        const friends = await Promise.all(user.friends.map(async (friendId) => {
+            const friendObject = await User.findById(friendId);
+            const friendAvatar = await File.findById(friendObject.avatar);
+            return {
+                email: friendObject.email,
+                firstName: friendObject.firstName,
+                lastName: friendObject.lastName,
+                friendAvatar: friendAvatar.path,
+                isLoggedIn: friendObject.isLoggedIn,
+                isVideoCalling: friendObject.isVideoCalling,
+                isAudioCalling: friendObject.isAudioCalling,
+            };
+        }));
+
+        const token = jwt.sign({
+            email,
+            userId:user._id
+        }, process.env.SECRET_KEY,
+        { 
+            expiresIn:60*60*24*3,
+        });
+        
+        user.isLoggedIn = true;
+        user.inactiveSince = "";
+        await user.save();
+        
+        res.status(200).json({
+            isVerified:true,
+            token,
+            firstName: user.firstName,
+            lastName: user.lastName,
+            avatar: avatar.path,
+            dateOfBirth: user.dateOfBirth,
+        });
     } catch (error) {
-        console.log(error);
+        console.error(error);
+        res.status(500).json({ error: "Internal server error" });
     }
-})
+});
+
+// Signup endpoint
+userRouter.post("/signup", async (req, res) => {
+    try {
+        const { email, password, firstName, lastName, avatar, date } = req.body;
+        
+        const existingUser = await User.findOne({ email });
+        if (existingUser) {
+            return res.status(400).json({ error: "User with this email already exists" });
+        }
+
+        const userAvatar = await File.create({ path: avatar });
+        const hashedPassword = await bcrypt.hash(password, 10);
+        
+        const user= await User.create({
+            email,
+            firstName,
+            lastName,
+            password: hashedPassword,
+            avatar: userAvatar._id,
+            isLoggedIn: true,
+            dateOfBirth: date,
+            currentIp: requestIP.getClientIp(req),
+            inactiveSince: ""
+        });
+
+        const token = jwt.sign({
+            email,
+            userId:user._id
+        }, process.env.SECRET_KEY,
+        { 
+            expiresIn:60*60*24*3,
+        });
+        
+        user.isLoggedIn = true;
+        user.inactiveSince = "";
+        await user.save();
+        
+        res.status(200).json({
+            isVerified:true,
+            token,
+            firstName: user.firstName,
+            lastName: user.lastName,
+            avatar: avatar.path,
+            dateOfBirth: user.dateOfBirth,
+        });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: "Internal server error" });
+    }
+});
+
+// Get friends endpoint
 userRouter.get("/friends", async (req, res) => {
     try {
-        if (req.cookies.jwt_token) {
-            let { email } = jwt.verify(req.cookies.jwt_token, process.env.SECRET_KEY);
-            let user = await User.findOne({ email });
-            if (user) {
-                let friends = [];
-                await Promise.all(user.friends.map(async (friendId) => {
-                    let friend = await User.findById(friendId);
-                    if (!friend) return null;
-                    let foundDiscussion = await Discussion.findOne({
-                        members: { $all: [friend._id,user._id] }
-                    });
-                    if(foundDiscussion){
-                        let messages = [];
-                        for await (const element of foundDiscussion.messages) {
-                            let message = await Message.findById(element);
-                            if(message){
-                                messages.push(
-                                    {
-                                        messageIsMine: message.from.toString() === user._id.toString(),
-                                        filesCount: message.files.length,
-                                        reactions: message.reactions.length,
-                                        unseenMessagesCount: foundDiscussion.messages.length,
-                                        content: message.content,
-                                        createdAt: message.createdAt,
-                                        id:message._id
-                                    }
-                                )
-                            }
-                        }
-                        let friendAvatar = await File.findById(friend.avatar);
-                        let userObject = {
-                            isLoggedIn: friend.isLoggedIn,
-                            isVideoCalling: friend.isVideoCalling,
-                            isAudioCalling: friend.isAudioCalling,
-                            email: friend.email,
-                            username: `${friend.firstName} ${friend.lastName}`,
-                            friendAvatar: friendAvatar.path,
-                            discussionId:foundDiscussion._id,
-                            id: friend._id,
-                            messages
-                        };
-                        friends.push(userObject);
-                    }
-                }));
-                friends = friends.filter(friend => friend !== null);
-                let token = jwt.sign({ friends }, process.env.SECRET_KEY);
-                return res.status(200).json({ token });
-            } else {
-                return res.status(404).json({ error: "User not found" });
-            }
-        } else {
+        const token = req.cookies.jwt_token;
+        if (!token) {
             return res.status(401).json({ error: "Unauthorized access" });
+        }
+
+        const decoded = verifyToken(token);
+        if (!decoded) {
+            return res.status(401).json({ error: "Invalid token" });
+        }
+
+        const user = await User.findOne({ email: decoded.email });
+        if (!user) {
+            return res.status(404).json({ error: "User not found" });
+        }
+
+        const friends = await Promise.all(user.friends.map(async (friendId) => {
+            const friend = await User.findById(friendId);
+            if (!friend) return null;
+
+            const foundDiscussion = await Discussion.findOne({
+                members: { $all: [friend._id, user._id] }
+            });
+
+            if (!foundDiscussion) return null;
+
+            const messages = await Promise.all(foundDiscussion.messages.map(async (messageId) => {
+                const message = await Message.findById(messageId);
+                if (!message) return null;
+                
+                return {
+                    messageIsMine: message.from.toString() === user._id.toString(),
+                    filesCount: message.files.length,
+                    reactions: message.reactions.length,
+                    unseenMessagesCount: foundDiscussion.messages.length,
+                    content: message.content,
+                    createdAt: message.createdAt,
+                    id: message._id
+                };
+            }));
+
+            const friendAvatar = await File.findById(friend.avatar);
+            return {
+                isLoggedIn: friend.isLoggedIn,
+                isVideoCalling: friend.isVideoCalling,
+                isAudioCalling: friend.isAudioCalling,
+                email: friend.email,
+                username: `${friend.firstName} ${friend.lastName}`,
+                friendAvatar: friendAvatar.path,
+                discussionId: foundDiscussion._id,
+                id: friend._id,
+                messages: messages.filter(m => m !== null)
+            };
+        }));
+
+        res.status(200).json({ friends: friends.filter(friend => friend !== null) });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: "Internal server error" });
+    }
+});
+
+// Search friends endpoint
+userRouter.get("/search-friends", async (req, res) => {
+    try {
+        const token = req.cookies.jwt_token;
+        if (!token) {
+            return res.status(401).json({ error: "Unauthorized access" });
+        }
+
+        const decoded = verifyToken(token);
+        if (!decoded) {
+            return res.status(401).json({ error: "Invalid token" });
+        }
+
+        const user = await User.findOne({ email: decoded.email });
+        if (!user) {
+            return res.status(404).json({ error: "User not found" });
+        }
+
+        if (!req.query.name) {
+            return res.status(400).json({ error: "Name parameter is required" });
+        }
+
+        let users = [];
+        const nameParts = req.query.name.split(" ");
+
+        if (nameParts.length === 1) {
+            users = await User.find({ 
+                $or: [
+                    { firstName: nameParts[0] },
+                    { lastName: nameParts[0] }
+                ]
+            });
+        } else if (nameParts.length === 2) {
+            users = await User.find({
+                $or: [
+                    { firstName: nameParts[0], lastName: nameParts[1] },
+                    { firstName: nameParts[1], lastName: nameParts[0] }
+                ]
+            });
+        }
+
+        if (users.length === 0) {
+            return res.status(404).json({ error: "No users matching the given name" });
+        }
+
+        const items = await Promise.all(users.map(async (element) => {
+            const friendAvatar = await File.findById(element.avatar);
+            const friendRequest = await Request.findOne({
+                from: user._id,
+                to: element._id
+            });
+
+            const similarFriendsCount = element.friends.filter(friendId => 
+                user.friends.includes(friendId)
+            ).length;
+
+            return {
+                email: element.email,
+                name: `${element.firstName} ${element.lastName}`,
+                friendAvatar: friendAvatar.path,
+                isLoggedIn: element.isLoggedIn,
+                isMyFriend: user.friends.includes(element._id),
+                isBlocked: user.blockedUsers.includes(element._id),
+                isAudioCalling: element.isAudioCalling,
+                isVideoCalling: element.isVideoCalling,
+                isMe: user._id.toString() === element._id.toString(),
+                similarFriendsCount,
+                id: element._id,
+                requestObject: friendRequest ? {
+                    from: friendRequest.from,
+                    to: friendRequest.to,
+                } : null
+            };
+        }));
+
+        res.status(200).json({ items });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: "Internal server error" });
+    }
+});
+
+// Toggle add friend endpoint
+userRouter.post("/toggle-add-friend", async (req, res) => {
+    try {
+        const token = req.cookies.jwt_token;
+        if (!token) {
+            return res.status(401).json({ error: "Unauthorized access" });
+        }
+
+        const decoded = verifyToken(token);
+        if (!decoded) {
+            return res.status(401).json({ error: "Invalid token" });
+        }
+
+        const user = await User.findOne({ email: decoded.email });
+        if (!user) {
+            return res.status(404).json({ error: "User not found" });
+        }
+
+        const { id: friendId } = req.body;
+        const friend = await User.findById(friendId);
+        if (!friend) {
+            return res.status(404).json({ error: "Friend not found" });
+        }
+
+        if (user.friends.includes(friend._id)) {
+            // Remove friend
+            user.friends.pull(friendId);
+            friend.friends.pull(user._id);
+            
+            await Notification.create({
+                for: friend._id,
+                content: `${user.firstName} ${user.lastName} have removed you from the friends list`,
+                handler: user._id
+            });
+
+            await user.save();
+            await friend.save();
+            
+            return res.json({ message: "Successfully removed from friends list" });
+        } else {
+            // Add friend request
+            const friendRequest = await Request.create({
+                from: user._id,
+                to: friend._id,
+                isSent: true
+            });
+
+            await Notification.create({
+                for: friend._id,
+                content: `Friend request received from ${user.firstName} ${user.lastName}`,
+                handler: user._id
+            });
+
+            user.friendRequests.push(friendRequest._id);
+            await user.save();
+            
+            return res.status(201).json({ message: "Request sent" });
         }
     } catch (error) {
         console.error(error);
-        return res.status(500).json({ error: "Internal Server Error" });
+        res.status(500).json({ error: "Internal server error" });
     }
 });
-userRouter.get("/search-friends", async(req,res)=>{
+
+// Toggle block friend endpoint
+userRouter.post("/toggle-block-friend", async (req, res) => {
     try {
-        if(req.cookies.jwt_token){
-            let {email} = jwt.verify(req.cookies.jwt_token,process.env.SECRET_KEY);
-            let user = await User.findOne({email});
-            if(req.query.name){
-                if(req.query.name.split(" ").length == 1){
-                    let usersByFirstName = await User.find({firstName: req.query.name});
-                    if(usersByFirstName.length === 0){
-                        let usersByLastName = await User.find({lastName: req.query.name});
-                        if(usersByLastName.length === 0){
-                            let token = jwt.sign({not_found:"No users matching the given name"},process.env.SECRET_KEY);
-                            res.json({token})
-                        }else{
-                            let items = [];
-                            let similarFriendsCount = 0;
-                            for (const element of usersByLastName) {
-                                let friendAvatar = await File.findById(element.avatar);
-                                let requestObject = null;
-                                let friendRequest = await Request.findOne({
-                                    from:user._id,
-                                    to:element._id
-                                }); 
-                                if(friendRequest){
-                                    requestObject = {
-                                        from:friendRequest.from,
-                                        to:friendRequest.to,
-                                    }
-                                }
-                                for(let el of element.friends){
-                                    if(user.friends.includes(el)){
-                                        similarFriendsCount++;
-                                    }
-                                }
-                                let elementObject = {
-                                    email:element.email,
-                                    name:`${element.firstName} ${element.lastName}`,
-                                    friendAvatar:friendAvatar.path,
-                                    isLoggedIn:element.isLoggedIn,
-                                    isMyFriend:user.friends.includes(element._id),
-                                    isBlocked:user.friends.includes(element._id) && user.blockedUsers.includes(element._id),
-                                    isAudioCalling:element.isAudioCalling,
-                                    isVideoCalling:element.isVideoCalling,
-                                    isMe:user._id == element._id.toString(),
-                                    similarFriendsCount,
-                                    id:element._id,
-                                    requestObject
-                                }
-                                items.push(elementObject);
-                            }
-                            let token = jwt.sign({items},process.env.SECRET_KEY);
-                            res.status(200).json({token})
-                        }
-                    }else{
-                        let items = [];
-                        let similarFriendsCount = 0;
-                        for (const element of usersByFirstName) {
-                            let requestObject = null;
-                            let friendRequest = await Request.findOne({
-                                from:user._id,
-                                to:element._id
-                            }); 
-                            if(friendRequest){
-                                requestObject = {
-                                    from:friendRequest.from,
-                                    to:friendRequest.to,
-                                }
-                            }
-                            for(let el of element.friends){
-                                if(user.friends.includes(el)){
-                                    similarFriendsCount++;
-                                }
-                            }
-                            let friendAvatar = await File.findById(element.avatar);
-                            let elementObject = {
-                                email:element.email,
-                                name:`${element.firstName} ${element.lastName}`,
-                                friendAvatar:friendAvatar.path,
-                                isLoggedIn:element.isLoggedIn,
-                                isMyFriend:user.friends.includes(element._id),
-                                isBlocked:user.friends.includes(element._id) && user.blockedUsers.includes(element._id),
-                                isAudioCalling:element.isAudioCalling,
-                                isVideoCalling:element.isVideoCalling,
-                                isMe:user._id == element._id.toString(),
-                                similarFriendsCount,
-                                id:element._id,
-                                requestObject
-                            }
-                            items.push(elementObject);
-                        }
-                        let token = jwt.sign({items},process.env.SECRET_KEY);
-                        res.status(200).json({token})
-                    }
-                }else if(req.query.name.split(" ").length == 2){
-                    let users = await User.find({firstName: req.query.name[0],lastName: req.query.name[1]});
-                    if(users.length === 0){
-                        let usersInv = await User.find({firstName: req.query.name[1],lastName: req.query.name[0]});
-                        if(usersInv.length === 0){
-                            let token = jwt.sign({not_found:"No users matching the given name"},process.env.SECRET_KEY);
-                            res.json({token})
-                        }else{
-                            let items = [];
-                            let similarFriendsCount;
-                            for (const element of usersInv) {
-                                let requestObject = null;
-                                let friendRequest = await Request.findOne({
-                                    from:user._id,
-                                    to:element._id
-                                }); 
-                                if(friendRequest){
-                                    requestObject = {
-                                        from:friendRequest.from,
-                                        to:friendRequest.to,
-                                    }
-                                }
-                                for(let el of element.friends){
-                                    if(user.friends.includes(el)){
-                                        similarFriendsCount++;
-                                    }
-                                }
-                                let friendAvatar = await File.findById(element.avatar);
-                                let elementObject = {
-                                    email:element.email,
-                                    name:`${element.firstName} ${element.lastName}`,
-                                    friendAvatar:friendAvatar.path,
-                                    isLoggedIn:element.isLoggedIn,
-                                    isMyFriend:user.friends.includes(element._id),
-                                    isBlocked:user.friends.includes(element._id) && user.blockedUsers.includes(element._id),
-                                    isAudioCalling:element.isAudioCalling,
-                                    isVideoCalling:element.isVideoCalling,
-                                    isMe:user._id == element._id.toString(),
-                                    similarFriendsCount,
-                                    id:element._id,
-                                    requestObject
-                                }
-                                items.push(elementObject);
-                            }
-                            let token = jwt.sign({items},process.env.SECRET_KEY);
-                            res.status(200).json({token})
-                        }
-                    }else{
-                        let items = [];
-                        let similarFriendsCount = 0;
-                        for (const element of users) {
-                            let requestObject = null;
-                            let friendRequest = await Request.findOne({
-                                from:user._id,
-                                to:element._id
-                            }); 
-                            if(friendRequest){
-                                requestObject = {
-                                    from:friendRequest.from,
-                                    to:friendRequest.to,
-                                }
-                            }
-                            for(let el of element.friends){
-                                if(user.friends.includes(el)){
-                                    similarFriendsCount++;
-                                }
-                            }
-                            let friendAvatar = await File.findById(element.avatar);
-                            let elementObject = {
-                                email:element.email,
-                                name:`${element.firstName} ${element.lastName}`,
-                                friendAvatar:friendAvatar.path,
-                                isLoggedIn:element.isLoggedIn,
-                                isMyFriend:user.friends.includes(element._id),
-                                isBlocked:user.friends.includes(element._id) && user.blockedUsers.includes(element._id),
-                                isAudioCalling:element.isAudioCalling,
-                                isVideoCalling:element.isVideoCalling,
-                                isMe:user._id == element._id.toString(),
-                                similarFriendsCount,
-                                id:element._id,
-                                requestObject
-                            }
-                            items.push(elementObject);
-                        }
-                        let token = jwt.sign({items},process.env.SECRET_KEY);
-                        res.status(200).json({token})
-                    }
-                }
-            }else{
-                let token = jwt.sign({data:req.query},process.env.SECRET_KEY);
-                res.json({token})
-            }
-        }else{
-            let token = jwt.sign({error:"something went wrong XD"},process.env.SECRET_KEY);
-            res.status(404).json({token});
+        const token = req.cookies.jwt_token;
+        if (!token) {
+            return res.status(401).json({ error: "Unauthorized access" });
         }
-    } catch (error) {
-        console.log(error);
-    }
-})
-userRouter.post("/toggle-add-friend", async(req,res)=>{
-    try {
-        if(req.cookies.jwt_token){
-            let {email} = jwt.verify(req.cookies.jwt_token,process.env.SECRET_KEY);
-            let friendId = jwt.verify(req.body.body,process.env.SECRET_KEY).id;
-            let user = await User.findOne({email});
-            let friend = await User.findById(friendId);
-            if(user.friends.includes(friend._id)){
-                user.friends.splice(user.friends.indexOf(friendId), 1);
-                friend.friends.splice(friend.friends.indexOf(user._id), 1);
-                await user.save();
-                await friend.save();
-                let notification = await Notification.create({
-                    for:friend._id,
-                    content:`${user.firstName} ${user.lastName} have removed you from the friends list`,
-                    handler:user._id
-                })
-                let token = jwt.sign({message:"successfully removed from friends list"},process.env.SECRET_KEY);
-                res.json({token});
-            }else{
-                let friendRequest = await Request.create({
-                    from:user._id,
-                    to:friend._id,
-                    isSent:true
-                })
-                let notification = await Notification.create({
-                    for:friend._id,
-                    content:`Friend request received from ${user.firstName} ${user.lastName}`,
-                    handler:user._id
-                })
-                user.friendRequests.push(friendRequest._id);
-                await user.save();
-                let token = jwt.sign({message:"request sent"},process.env.SECRET_KEY);
-                res.status(201).json({token});
-            }
-        }else{
-            res.status(400).json({message:"bad request"})
+
+        const decoded = verifyToken(token);
+        if (!decoded) {
+            return res.status(401).json({ error: "Invalid token" });
         }
-    } catch (error) {
-        console.log(error);
-    }
-})
-userRouter.post("/toggle-block-friend", async(req,res)=>{
-    try {
-        if(req.cookies.jwt_token){
-            let {email} = jwt.verify(req.cookies.jwt_token,process.env.SECRET_KEY);
-            let friendId = jwt.verify(req.body.body,process.env.SECRET_KEY);
-            let friend = await User.findById(friendId);
-            let user = await User.findOne({email});
-            if(user.blockedUsers.includes(friendId)){
-                user.friends.splice(user.friends.indexOf(friendId), 1);
-                let notification = await Notification.create({
-                    content:`You have been unblocked by ${user.firstName} ${user.lastName}`,
-                    handler:user._id,
-                    for:friend._id
-                })
-                await user.save();
-                let token = jwt.sign({message:"friend removed from blocked list"},process.env.SECRET_KEY);
-                res.json({token});
-            }else{
-                user.friends.push(friendId);
-                let notification = await Notification.create({
-                    content:`You have been blocked by ${user.firstName} ${user.lastName}`,
-                    handler:user._id,
-                    for:friend._id
-                })
-                await user.save();
-                let token = jwt.sign({message:"friend added to blocked list"},process.env.SECRET_KEY);
-                res.json({token});
-            }
+
+        const user = await User.findOne({ email: decoded.email });
+        if (!user) {
+            return res.status(404).json({ error: "User not found" });
         }
-    } catch (error) {
-        console.log(error);
-    }
-})
-userRouter.get("/requests",async(req,res)=>{
-    try {
-        if(req.cookies.jwt_token){
-            let {email} = jwt.verify(req.cookies.jwt_token,process.env.SECRET_KEY);
-            let user = await User.findOne({email});
-            let requests = await Request.find({to:user._id});
-            let friendRequests = [];
-            for (const element of requests) {
-                let requestSender = await User.findById(element.from);
-                let senderAvatar = await File.findById(requestSender.avatar);
-                let requestObject = {
-                    senderAvatar:senderAvatar.path,
-                    requestSender:`${requestSender.firstName} ${requestSender.lastName}`,
-                    isMine:requestSender._id.toString() == user._id.toString(),
-                    id:element._id,
-                }
-                friendRequests.push(requestObject);
-            }
-            let token = jwt.sign({friendRequests},process.env.SECRET_KEY);
-            res.status(200).json({token});
+
+        const { id: friendId } = req.body;
+        const friend = await User.findById(friendId);
+        if (!friend) {
+            return res.status(404).json({ error: "Friend not found" });
         }
-    } catch (error) {
-        console.log(error);
-    }
-})
-userRouter.put("/requests-toggle",async(req,res)=>{
-    try {
-        if(req.cookies.jwt_token){
-            let {email} = jwt.verify(req.cookies.jwt_token,process.env.SECRET_KEY);
-            let {id,approve} = jwt.verify(req.body.body,process.env.SECRET_KEY);
-            let user = await User.findOne({email});
-            let request = await Request.findById(id);
-            let requestSender = await User.findById(request.from);
-            let requestReceiver = await User.findById(request.to);
-            if(approve){
-                let notificationForSender = await Notification.create({
-                    for:requestSender._id,
-                    content:`Friend request accepted by ${requestReceiver.firstName} ${requestReceiver.lastName}`,
-                    handler:requestReceiver._id
-                });
-                let notificationForReceiver = await Notification.create({
-                    for:requestReceiver._id,
-                    content:`${requestSender.firstName} ${requestSender.lastName} has been added to your friends list`,
-                    handler:requestReceiver._id
-                });
-                let discussion =new Discussion({});
-                discussion.members.push(requestReceiver._id);
-                discussion.members.push(requestSender._id);
-                await discussion.save();
-                requestSender.friendRequests.splice(requestSender.friendRequests.indexOf(request._id), 1);
-                requestReceiver.friendRequests.splice(requestReceiver.friendRequests.indexOf(request._id),1);
-                await Request.findByIdAndDelete(request._id);
-                requestSender.friends.push(requestReceiver._id);
-                requestReceiver.friends.push(requestSender._id);
-                await requestSender.save();
-                await requestReceiver.save();
-                let token = jwt.sign({message_success:"friend added"},process.env.SECRET_KEY);
-                res.json({token});
-            }else{
-                let notificationForSender = await Notification.create({
-                    for:requestSender._id,
-                    content:`Friend request rejected by ${requestReceiver.firstName} ${requestReceiver.lastName}`,
-                    handler:requestSender._id
-                });
-                let notificationForReceiver = await Notification.create({
-                    for:requestReceiver._id,
-                    content:`${requestSender.firstName} ${requestSender.lastName} request has been rejected`,
-                    handler:requestSender._id
-                });
-                requestSender.friendRequests.splice(requestSender.friendRequests.indexOf(request._id), 1);
-                requestReceiver.friendRequests.splice(requestReceiver.friendRequests.indexOf(request._id),1);
-                await Request.findByIdAndDelete(request._id);
-                await requestSender.save();
-                await requestReceiver.save();
-                let token = jwt.sign({message_failure:"friend removed"},process.env.SECRET_KEY);
-                res.json({token});
-            }
-        }else{
-            res.status(400).json({message:"bad request"})
-        }
-    } catch (error) {
-        console.log(error);
-    }
-})
-userRouter.post("/logout",async(req,res)=>{
-    try {
-        if(req.cookies.jwt_token){
-            let {email} = jwt.verify(req.cookies.jwt_token,process.env.SECRET_KEY);
-            let user = await User.findOne({email});
-            user.isLoggedIn = false;
-            user.inactiveSince = Date.now().toString();
+
+        if (user.blockedUsers.includes(friendId)) {
+            // Unblock
+            user.blockedUsers.pull(friendId);
+            
+            await Notification.create({
+                content: `You have been unblocked by ${user.firstName} ${user.lastName}`,
+                handler: user._id,
+                for: friend._id
+            });
+            
             await user.save();
-            let token = jwt.sign({message:"successfully logged out"},process.env.SECRET_KEY);
-            res.json({token})
-        }else{
-            let token = jwt.sign({error:"something went wrong"},process.env.SECRET_KEY);
-            res.json({token});
+            return res.json({ message: "Friend removed from blocked list" });
+        } else {
+            // Block
+            user.blockedUsers.push(friendId);
+            
+            await Notification.create({
+                content: `You have been blocked by ${user.firstName} ${user.lastName}`,
+                handler: user._id,
+                for: friend._id
+            });
+            
+            await user.save();
+            return res.json({ message: "Friend added to blocked list" });
         }
     } catch (error) {
-        console.log(error);
+        console.error(error);
+        res.status(500).json({ error: "Internal server error" });
     }
-})
+});
+
+// Get friend requests endpoint
+userRouter.get("/requests", async (req, res) => {
+    try {
+        const token = req.cookies.jwt_token;
+        if (!token) {
+            return res.status(401).json({ error: "Unauthorized access" });
+        }
+
+        const decoded = verifyToken(token);
+        if (!decoded) {
+            return res.status(401).json({ error: "Invalid token" });
+        }
+
+        const user = await User.findOne({ email: decoded.email });
+        if (!user) {
+            return res.status(404).json({ error: "User not found" });
+        }
+
+        const requests = await Request.find({ to: user._id });
+        const friendRequests = await Promise.all(requests.map(async (request) => {
+            const requestSender = await User.findById(request.from);
+            const senderAvatar = await File.findById(requestSender.avatar);
+            
+            return {
+                senderAvatar: senderAvatar.path,
+                requestSender: `${requestSender.firstName} ${requestSender.lastName}`,
+                isMine: requestSender._id.toString() === user._id.toString(),
+                id: request._id,
+            };
+        }));
+
+        res.status(200).json({ friendRequests });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: "Internal server error" });
+    }
+});
+
+// Handle friend request response endpoint
+userRouter.put("/requests-toggle", async (req, res) => {
+    try {
+        const token = req.cookies.jwt_token;
+        if (!token) {
+            return res.status(401).json({ error: "Unauthorized access" });
+        }
+
+        const decoded = verifyToken(token);
+        if (!decoded) {
+            return res.status(401).json({ error: "Invalid token" });
+        }
+
+        const user = await User.findOne({ email: decoded.email });
+        if (!user) {
+            return res.status(404).json({ error: "User not found" });
+        }
+
+        const { id, approve } = req.body;
+        const request = await Request.findById(id);
+        if (!request) {
+            return res.status(404).json({ error: "Request not found" });
+        }
+
+        const requestSender = await User.findById(request.from);
+        const requestReceiver = await User.findById(request.to);
+
+        if (approve) {
+            // Approve request
+            await Notification.create({
+                for: requestSender._id,
+                content: `Friend request accepted by ${requestReceiver.firstName} ${requestReceiver.lastName}`,
+                handler: requestReceiver._id
+            });
+
+            await Notification.create({
+                for: requestReceiver._id,
+                content: `${requestSender.firstName} ${requestSender.lastName} has been added to your friends list`,
+                handler: requestReceiver._id
+            });
+
+            const discussion = new Discussion({
+                members: [requestReceiver._id, requestSender._id]
+            });
+            await discussion.save();
+
+            requestSender.friendRequests.pull(request._id);
+            requestReceiver.friendRequests.pull(request._id);
+            await Request.findByIdAndDelete(request._id);
+
+            requestSender.friends.push(requestReceiver._id);
+            requestReceiver.friends.push(requestSender._id);
+
+            await requestSender.save();
+            await requestReceiver.save();
+
+            return res.json({ message: "Friend added" });
+        } else {
+            // Reject request
+            await Notification.create({
+                for: requestSender._id,
+                content: `Friend request rejected by ${requestReceiver.firstName} ${requestReceiver.lastName}`,
+                handler: requestSender._id
+            });
+
+            await Notification.create({
+                for: requestReceiver._id,
+                content: `${requestSender.firstName} ${requestSender.lastName} request has been rejected`,
+                handler: requestSender._id
+            });
+
+            requestSender.friendRequests.pull(request._id);
+            requestReceiver.friendRequests.pull(request._id);
+            await Request.findByIdAndDelete(request._id);
+
+            await requestSender.save();
+            await requestReceiver.save();
+
+            return res.json({ message: "Request rejected" });
+        }
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: "Internal server error" });
+    }
+});
+
+// Logout endpoint
+userRouter.post("/logout", async (req, res) => {
+    try {
+        const token = req.cookies.jwt_token;
+        if (!token) {
+            return res.status(401).json({ error: "Unauthorized access" });
+        }
+
+        const decoded = verifyToken(token);
+        if (!decoded) {
+            return res.status(401).json({ error: "Invalid token" });
+        }
+
+        const user = await User.findOne({ email: decoded.email });
+        if (!user) {
+            return res.status(404).json({ error: "User not found" });
+        }
+
+        user.isLoggedIn = false;
+        user.inactiveSince = Date.now().toString();
+        await user.save();
+
+        res.json({ message: "Successfully logged out" });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: "Internal server error" });
+    }
+});
+
 module.exports = userRouter;

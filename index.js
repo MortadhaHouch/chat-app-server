@@ -46,6 +46,10 @@ app.use(fileUpload({
 //     }
 //     next()
 // })
+app.use((req,res,next)=>{
+    console.log(req.method,req.url,new Date().toLocaleDateString());
+    next()
+})
 app.use("/user",userRouter);
 app.use("/notifications",checkUserAuth,notificationsRouter);
 app.use("/groups",checkUserAuth,groupRouter);
@@ -55,6 +59,7 @@ server.listen(process.env.PORT,()=>{
 })
 io.on("connection",(socket)=>{
     socket.on("join-room", async ({ discussionId }) => {
+        console.log(discussionId);
         const rooms = Array.from(socket.rooms);
         if (!rooms.includes(discussionId)) {
             socket.join(discussionId);
@@ -64,43 +69,50 @@ io.on("connection",(socket)=>{
             console.log(`Socket ${socket.id} is already in room ${discussionId}`);
         }
     });
-    socket.on("send-message",async(data)=>{
+    socket.on("send-message", async (data) => {
         try {
-            if(socket.handshake.auth.token?.length > 0){
-                let discussion = await Discussion.findById(data.discussionId);
-                let {email} = jwt.verify(socket.handshake.auth.token,process.env.SECRET_KEY);
-                let user = await User.findOne({email});
-                if (!user){
-                    return;
-                }
-                if(discussion && discussion.members.includes(user._id)){
-                    let message = new Message({
-                        content:data.message,
-                        from:user._id
-                    })
-                    message.to.push(...discussion.members.filter((id)=>id.toString()!==user._id.toString()));
-                    await message.save();
-                    discussion.messages.push(message._id);
-                    await discussion.save();
-                    if(!socket.rooms.has(data.discussionId)){
-                        socket.join(data.discussionId);
-                        io.compress(false).to(data.discussionId).emit("receive-message",{
-                            content:message.content,
-                            filesCount:message.files.length,
-                            messageIsMine:message.from.toString()===user._id.toString(),
-                            reactions:message.reactions.length,
-                            unseenMessagesCount:discussion.messages.filter((item)=>!item.isSeen).length,
-                            createdAt:message.createdAt,
-                            id:message._id
-                        });
-                    }
-                }
-            }else{
-                return;
+            if (!socket.handshake.auth.token || !data?.discussionId) {
+                return socket.emit("error", "Missing authentication or discussion ID");
             }
+            const [decoded, discussion] = await Promise.all([
+                jwt.verify(socket.handshake.auth.token, process.env.SECRET_KEY),
+                Discussion.findById(data.discussionId)
+            ]);
+            if (!decoded?.email || !discussion) {
+                return socket.emit("error", "Invalid token or discussion");
+            }
+            const user = await User.findById(decoded.userId);
+            if (!user || !discussion.members.includes(user._id)) {
+                return socket.emit("error", "User not authorized");
+            }
+            const message = await Message.create({
+                content: data.message,
+                from: user._id,
+                to: discussion.members.filter(id => id.toString() !== user._id.toString())
+            });
+            await Discussion.updateOne(
+                { _id: data.discussionId },
+                { $push: { messages: message._id } }
+            );
+            if (!socket.rooms.has(data.discussionId)) {
+                socket.join(data.discussionId);
+            }
+            io.to(data.discussionId).emit("receive-message", {
+                id: message._id,
+                content: message.content,
+                senderId: user._id,
+                createdAt: message.createdAt,
+                isMine:message.from.toString() == user._id.toString(),
+                filesCount: 0,
+                reactions: []
+            });
         } catch (error) {
-            console.log(error);
+            console.error("Message send error:", error);
+            socket.emit("error", "Message sending failed");
         }
+    });
+    socket.on("connect-to-user",(id)=>{
+        socket.emit("connected-to-user",id);
     })
 })
 app.get("/",(req,res)=>{

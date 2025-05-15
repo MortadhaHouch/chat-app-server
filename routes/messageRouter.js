@@ -1,118 +1,155 @@
-let express = require("express");
-let messageRouter = express.Router();
-let Message = require("../models/message");
+const express = require("express");
+const router = express.Router();
 const jwt = require("jsonwebtoken");
-const User = require("../models/user");
-let Discussion = require("../models/discussion");
+const mongoose = require("mongoose");
 require("dotenv").config();
-let File = require("../models/file");
-messageRouter.get("/:id/:p?",async(req,res)=>{
-    try {
-        if(req.cookies.jwt_token){
-            let {email} = jwt.verify(req.cookies.jwt_token,process.env.SECRET_KEY);
-            let user = await User.findOne({email});
-            if(user){
-                let friend = await User.findById(req.params.id);
-                let discussion = await Discussion.findOne({
-                    members:{
-                        $in:[user._id,friend._id]
-                    }
-                })
-                let messages = [];
-                if(discussion.messages.length <= 10){
-                    for await (const element of discussion.messages) {
-                        let message = await Message.findById(element._id);
-                        let messageFiles = [];
-                        for await (const f of message.files) {
-                            let file = await File.findById(f);
-                            messageFiles.push({
-                                size:file.size,
-                                name:file.name
-                            });
-                        }
-                        messages.push({
-                            id:element._id,
-                            content:message.content,
-                            files:messageFiles
-                        })
-                    }
-                }else{
-                    if(req.params.p && !isNaN(Number(req.params.p))){
-                        for await (const element of discussion.messages.slice(Number(req.params.p),Number(req.params.p) + 10)) {
-                            let message = await Message.findById(element._id);
-                            let messageFiles = [];
-                            for await (const f of message.files) {
-                                let file = await File.findById(f);
-                                messageFiles.push({
-                                    size:file.size,
-                                    name:file.name
-                                });
-                            }
-                            messages.push({
-                                id:element._id,
-                                content:message.content,
-                                files:messageFiles
-                            })
-                        }
-                    }else{
-                        for await (const element of discussion.messages.slice(0,10)) {
-                            let message = await Message.findById(element._id);
-                            let messageFiles = [];
-                            for await (const f of message.files) {
-                                let file = await File.findById(f);
-                                messageFiles.push({
-                                    size:file.size,
-                                    name:file.name
-                                });
-                            }
-                            messages.push({
-                                id:element._id,
-                                content:message.content,
-                                files:messageFiles
-                            })
-                        }
-                    }
-                }
-                let token = jwt.sign({messages},process.env.SECRET_KEY);
-                res.status(200).json({token});
-            }
-        }
-    } catch (error) {
-        console.log(error);
+
+// Models
+const Message = require("../models/message");
+const User = require("../models/user");
+const Discussion = require("../models/discussion");
+const File = require("../models/file");
+
+// Constants
+const MESSAGES_PER_PAGE = 10;
+
+// Authentication middleware
+const authenticate = async (req, res, next) => {
+  try {
+    const token = req.cookies.jwt_token;
+    if (!token) return res.status(401).json({ error: "Unauthorized" });
+
+    const decoded = jwt.verify(token, process.env.SECRET_KEY);
+    req.user = await User.findOne({ email: decoded.email }).select('-password');
+    
+    if (!req.user) return res.status(401).json({ error: "Invalid token" });
+    next();
+  } catch (error) {
+    res.status(401).json({ error: "Invalid token" });
+  }
+};
+
+// Get messages with pagination
+router.get("/:id/:page?", authenticate, async (req, res) => {
+  try {
+    const { id: friendId } = req.params;
+    const page = parseInt(req.params.page) || 0;
+    
+    if (!mongoose.Types.ObjectId.isValid(friendId)) {
+      return res.status(400).json({ error: "Invalid user ID" });
     }
-})
-messageRouter.post("/add",async(req,res)=>{
-    try {
-        let {email} = jwt.verify(req.cookies.jwt_token,process.env.SECRET_KEY);
-        let user = await User.findOne({email});
-        if(user){
-            let {files} = req;
-            let {userId,discussionId,content} = req.body;
-            let discussion = await Discussion.findById(discussionId);
-            let message = new Message({
-                content,
-                from:user._id,
-            })
-            message.to.push(userId);
-            for await (const element of files) {
-                let file = await File.create({
-                    name:element.originalname,
-                    path:element.path,
-                    size:element.size
-                });
-                message.files.push(file._id);
-            }
-            await message.save();
-            discussion.messages.push(message._id);
-            await discussion.save();
-            let token = jwt.sign({message},process.env.SECRET_KEY);
-            res.status(201).json({token});
-        }
-    } catch (error) {
-        console.log(error);
+
+    const discussion = await Discussion.findOne({
+      members: { $all: [req.user._id, friendId] }
+    }).populate({
+      path: 'messages',
+      options: {
+        skip: page * MESSAGES_PER_PAGE,
+        limit: MESSAGES_PER_PAGE,
+        sort: { createdAt: -1 }
+      },
+      populate: {
+        path: 'files',
+        select: 'size name'
+      }
+    });
+
+    if (!discussion) {
+      return res.status(404).json({ error: "Discussion not found" });
     }
-})
 
+    const messages = discussion.messages.map(message => ({
+      id: message._id,
+      content: message.content,
+      files: message.files.map(file => ({
+        size: file.size,
+        name: file.name
+      })),
+      isMine: message.from.toString() === req.user._id.toString(),
+      createdAt: message.createdAt
+    }));
 
+    res.status(200).json({
+      messages,
+      hasMore: discussion.messages.length > (page + 1) * MESSAGES_PER_PAGE
+    });
+  } catch (error) {
+    console.error("Get messages error:", error);
+    res.status(500).json({ error: "Server error" });
+  }
+});
 
-module.exports = messageRouter
+// Add new message
+router.post("/add", authenticate, async (req, res) => {
+  try {
+    const { userId, discussionId, content } = req.body;
+    const files = req.files || [];
+
+    if (!mongoose.Types.ObjectId.isValid(discussionId)) {
+      return res.status(400).json({ error: "Invalid discussion ID" });
+    }
+
+    const discussion = await Discussion.findById(discussionId);
+    if (!discussion) {
+      return res.status(404).json({ error: "Discussion not found" });
+    }
+
+    if (!discussion.members.includes(req.user._id)) {
+      return res.status(403).json({ error: "Not a discussion member" });
+    }
+
+    // Create files first
+    const fileUploads = files.map(file => 
+      File.create({
+        name: file.originalname,
+        path: file.path,
+        size: file.size
+      })
+    );
+
+    const uploadedFiles = await Promise.all(fileUploads);
+
+    // Create message with files
+    const message = new Message({
+      content,
+      from: req.user._id,
+      to: [userId],
+      files: uploadedFiles.map(file => file._id)
+    });
+
+    // Save message and update discussion in transaction
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
+    try {
+      const savedMessage = await message.save({ session });
+      discussion.messages.push(savedMessage._id);
+      await discussion.save({ session });
+      
+      await session.commitTransaction();
+      
+      // Prepare response without populating (faster)
+      const response = {
+        id: savedMessage._id,
+        content: savedMessage.content,
+        files: uploadedFiles.map(file => ({
+          size: file.size,
+          name: file.name
+        })),
+        createdAt: savedMessage.createdAt
+      };
+
+      res.status(201).json(response);
+    } catch (error) {
+      await session.abortTransaction();
+      throw error;
+    } finally {
+      session.endSession();
+    }
+  } catch (error) {
+    console.error("Add message error:", error);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+module.exports = router;
